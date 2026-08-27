@@ -13,11 +13,18 @@ import rclpy
 from rclpy.node import Node
 # import message_filters
 from bodyctrl_msgs.msg import MotorCtrl, MotorStatus,MotorStatusMsg, CmdMotorCtrl, Imu, Euler
+from sensor_msgs.msg import JointState, Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
+import glfw
 from queue import Queue
 from pynput import keyboard
 from scipy.spatial.transform import Rotation
 import os
+import sys
 from elastic_band import ElasticBand
+
+# 缩短 GIL 切换间隔, 降低物理线程被 400Hz 发布线程阻塞后的唤醒延迟
+sys.setswitchinterval(0.0005)
 
 def quaternion_to_euler_scipy(w, x, y, z, degrees=False):
     """
@@ -31,10 +38,21 @@ def quaternion_to_euler_scipy(w, x, y, z, degrees=False):
 
     return euler_angles[0], euler_angles[1], euler_angles[2]
 
+def sleep_until(deadline: float):
+    """睡眠到绝对截止时间: 先 sleep 到剩 0.2ms, 其余自旋等待,
+    规避 time.sleep 的定时器余量(中位约 60us)"""
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return
+        if remaining > 2e-4:
+            time.sleep(remaining - 2e-4)
+
 
 class RobotSimulator:
 
-    def __init__(self, model_path, node: Node | None = None, debug=False):
+    def __init__(self, model_path, node: Node | None = None, debug=False,
+                 depth=True, depth_width=640, depth_height=360):
         self.debug = debug
         # 加载模型
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -126,6 +144,32 @@ class RobotSimulator:
         self.elastic_band = ElasticBand(enable=True)
         self.band_attached_link = self.model.body("waist_pitch_link").id
 
+        # 深度相机：必须在 launch_passive 之前于主线程创建 GL 上下文并立即
+        # 释放（GLFW 仅允许主线程建窗口）。渲染线程逐帧 make-current/
+        # release，与 viewer 各自的上下文互不冲突，可同进程共存。
+        # 做法移植自 bitbot-ovinf src/device/mujoco_depth_camera.cc
+        self.depth_renderer = None
+        self.depth_enabled = False
+        self.depth_width = depth_width
+        self.depth_height = depth_height
+        if depth:
+            cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA,
+                                       'depth_camera')
+            if cam_id == -1:
+                print("警告: 模型中未定义 'depth_camera' 相机，深度渲染已禁用")
+            else:
+                self.depth_renderer = mujoco.Renderer(
+                    self.model, height=depth_height, width=depth_width)
+                self.depth_renderer.enable_depth_rendering()
+                glfw.make_context_current(None)
+                self.depth_enabled = True
+                self._depth_cam_id = cam_id
+                # 深度渲染裁剪面 (bitbot-ovinf dex_mj.xml: znear=0.1, zfar=50)。
+                # vis.map 为相对 extent 的比值; znear=0.1 同时遮挡相机外壳。
+                extent = float(self.model.stat.extent)
+                self.model.vis.map.znear = 0.20 / extent
+                self.model.vis.map.zfar = 50.0 / extent
+
         # 启动可视化器
         self.paused = False
         # self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
@@ -140,12 +184,6 @@ class RobotSimulator:
         #创建ROS相关话题
         self.node = node
         if self.node:
-            self.node.create_subscription(CmdMotorCtrl, 'arm/cmd_ctrl',
-                                          self.joint_cmd_callback, 10)
-            self.node.create_subscription(CmdMotorCtrl, 'leg/cmd_ctrl',
-                                          self.joint_cmd_callback, 10)
-            self.node.create_subscription(CmdMotorCtrl, 'waist/cmd_ctrl',
-                                          self.joint_cmd_callback, 10)
             #创建发布者
             self.arm_status_pub = self.node.create_publisher(
                 MotorStatusMsg, 'arm/status', 20)
@@ -155,6 +193,30 @@ class RobotSimulator:
                 MotorStatusMsg, 'waist/status', 10)
             self.imu_status_pub = self.node.create_publisher(
                 Imu, 'imu/status', 10)
+            # 供外部渲染/可视化进程使用的标准话题
+            self.joint_states_pub = self.node.create_publisher(
+                JointState, 'joint_states', 10)
+            self.pelvis_pose_pub = self.node.create_publisher(
+                PoseStamped, 'pelvis/pose', 10)
+            if self.depth_enabled:
+                self.depth_img_pub = self.node.create_publisher(
+                    Image, 'depth_camera/image_raw', 10)
+                self.depth_info_pub = self.node.create_publisher(
+                    CameraInfo, 'depth_camera/camera_info', 10)
+                fovy = float(self.model.cam_fovy[self._depth_cam_id])
+                fy = 0.5 * self.depth_height / np.tan(np.radians(fovy) / 2.0)
+                cx = (self.depth_width - 1) / 2.0
+                cy = (self.depth_height - 1) / 2.0
+                info = CameraInfo()
+                info.header.frame_id = 'depth_camera'
+                info.height = self.depth_height
+                info.width = self.depth_width
+                info.distortion_model = 'plumb_bob'
+                info.d = [0.0] * 5
+                info.k = [fy, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+                info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                info.p = [fy, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+                self.depth_info = info
         # 传感器返回的机器人状态
         self.joint_positions = {}
         self.joint_velocities = {}
@@ -180,6 +242,15 @@ class RobotSimulator:
 
         # 初始化控制器
         self.init_controller()
+        # 订阅放在状态初始化完成后创建，避免回调早于属性就绪
+        if self.node:
+            self.node.create_subscription(CmdMotorCtrl, 'arm/cmd_ctrl',
+                                          self.joint_cmd_callback, 10)
+            self.node.create_subscription(CmdMotorCtrl, 'leg/cmd_ctrl',
+                                          self.joint_cmd_callback, 10)
+            self.node.create_subscription(CmdMotorCtrl, 'waist/cmd_ctrl',
+                                          self.joint_cmd_callback, 10)
+
     def init_controller(self):
         if self.control_mode == 1:
             # 将位置控制器的增益设为0
@@ -233,6 +304,64 @@ class RobotSimulator:
         thread = threading.Thread(target=listen, daemon=True)
         thread.start()
 
+    def _publish_joint_states(self, sensor_data):
+        """发布 /joint_states 与 /pelvis/pose（供外部渲染/可视化用）"""
+        if not sensor_data:
+            return
+        msg = JointState()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.frame_id = 'pelvis'
+        joint_positions = sensor_data['joint_positions']
+        for name, pos in joint_positions.items():
+            msg.name.append(name)
+            msg.position.append(float(pos))
+        self.joint_states_pub.publish(msg)
+
+        pose = PoseStamped()
+        pose.header.stamp = msg.header.stamp
+        pose.header.frame_id = 'world'
+        quat = sensor_data['imu_orientation']  # [w, x, y, z]
+        pos = sensor_data['imu_position']      # imu site 即骨盆原点
+        pose.pose.position.x = float(pos[0])
+        pose.pose.position.y = float(pos[1])
+        pose.pose.position.z = float(pos[2])
+        pose.pose.orientation.w = float(quat[0])
+        pose.pose.orientation.x = float(quat[1])
+        pose.pose.orientation.y = float(quat[2])
+        pose.pose.orientation.z = float(quat[3])
+        self.pelvis_pose_pub.publish(pose)
+
+    def _render_and_publish_depth(self):
+        """同进程离屏渲染深度图并发布。
+
+        update_scene 仅读 MjData，需持有 sim_view_lock；GL 渲染只依赖已
+        填充的 MjvScene，可在锁外进行。渲染前 make-current（render 内部
+        完成）、渲染后释放，是 viewer 与本上下文共存的关键。
+        """
+        try:
+            with self.sim_view_lock:
+                self.depth_renderer.update_scene(self.data,
+                                                 camera='depth_camera')
+            depth = self.depth_renderer.render()
+            glfw.make_context_current(None)
+        except Exception as e:
+            print(f"深度渲染失败，已禁用: {e}")
+            self.depth_enabled = False
+            return
+        now = self.node.get_clock().now().to_msg()
+        img = Image()
+        img.header.stamp = now
+        img.header.frame_id = 'depth_camera'
+        img.height = self.depth_height
+        img.width = self.depth_width
+        img.encoding = '32FC1'
+        img.is_bigendian = 0
+        img.step = self.depth_width * 4
+        img.data = np.ascontiguousarray(depth, dtype=np.float32).tobytes()
+        self.depth_img_pub.publish(img)
+        self.depth_info.header.stamp = now
+        self.depth_info_pub.publish(self.depth_info)
+
     def start_publishing(self):
         """启动发布线程"""
         if not self.node:
@@ -257,6 +386,7 @@ class RobotSimulator:
         pub_freq = 400  # 100Hz发布频率
         pub_interval = 1.0 / pub_freq
         sensor_data = None
+        cycle = 0
         while self.pub_thread_running and not self.stop_event.is_set():
             start_time = time.perf_counter()
 
@@ -273,11 +403,25 @@ class RobotSimulator:
                                       self.leg_status_pub, sensor_data)
             # 发布Imu
             self._publish_imu_status(self.imu_status_pub, sensor_data)
+            # 100Hz 发布 joint_states / pelvis_pose（400Hz 中每4次1次）
+            if cycle % 4 == 0:
+                self._publish_joint_states(sensor_data)
+            # 50Hz 深度渲染（400Hz 中每8次1次, 对齐 ovinf depth frequency）
+            if self.depth_enabled and cycle % 8 == 0:
+                self._render_and_publish_depth()
+            cycle += 1
             # 控制发布频率
-            elapsed = time.perf_counter() - start_time
-            sleep_time = pub_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            next_step_time = start_time + pub_interval
+            now = time.perf_counter()
+            if next_step_time < now - 0.01:
+                next_step_time = now  # 落后过多(查看器卡顿等)时重同步, 不补跑
+            sleep_until(next_step_time)
+
+            # # 控制发布频率
+            # elapsed = time.perf_counter() - start_time
+            # sleep_time = pub_interval - elapsed
+            # if sleep_time > 0:
+            #     time.sleep(sleep_time)
 
     def _publish_imu_status(self, publisher, sensor_data):
         if publisher and sensor_data:
@@ -568,6 +712,9 @@ class RobotSimulator:
     def get_status(self, joint_name):
         # Todo: 处理还未收到传感器状态的情况
         with self.sensor_data_lock:
+            if (self.last_sensor_data is None
+                    or joint_name not in self.last_sensor_data['joint_positions']):
+                return {'position': 0.0, 'velocity': 0.0, 'torque': 0.0}
             joint_positions = self.last_sensor_data['joint_positions'].copy()
             joint_velocities = self.last_sensor_data['joint_velocities'].copy()
             joint_torques = self.last_sensor_data['joint_torques'].copy()
@@ -586,9 +733,19 @@ class RobotSimulator:
 
         target_time = 0
         # last_control_time = 0
+        rate_t0 = time.perf_counter()
+        rate_count = 0
+        next_step_time = time.perf_counter()
         try:
             while self.viewer.is_running() and not self.stop_event.is_set():
                 step_start = time.time()
+
+                rate_count += 1
+                if step_start - rate_t0 >= 2.0:
+                    print(f"sim rate: {rate_count / (step_start - rate_t0):.1f} Hz "
+                          f"(target {1.0 / self.model.opt.timestep:.0f} Hz)")
+                    rate_t0 = step_start
+                    rate_count = 0
 
                 target_time += self.model.opt.timestep
                 with self.sim_view_lock:
@@ -644,14 +801,26 @@ class RobotSimulator:
                         mujoco.mj_forward(self.model, self.data)
                 time_step += 1
 
+                # 控制仿真速度: 绝对截止时间步进。sleep 只睡到剩余 0.3ms,
+                # 其余自旋等待, 消除 time.sleep 的定时器余量(~60us/次);
+                # deadline 按固定周期累加, 单次超支会在后续步补偿回来,
+                # 不会像相对 step_start 步进那样无限漂移。
+                next_step_time += self.model.opt.timestep
+                now = time.perf_counter()
+                if next_step_time < now - 0.01:
+                    next_step_time = now  # 落后过多(查看器卡顿等)时重同步, 不补跑
+                sleep_until(next_step_time)
+
                 # 控制仿真速度
-                time_until_next_step = self.model.opt.timestep - (time.time() -
-                                                                  step_start)
-                print(f'sim timestep: {time_until_next_step}')
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
+                # time_until_next_step = self.model.opt.timestep - (time.time() -
+                #                                                   step_start)
+                # print(f'sim timestep: {time_until_next_step}')
+                # if time_until_next_step > 0:
+                #     time.sleep(time_until_next_step)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"Simulation thread error: {e}")
         finally:
             print("Simulation thread stopped")
@@ -661,6 +830,10 @@ class RobotSimulator:
             self.data.xfrc_applied[self.band_attached_link, :3] = self.elastic_band.Advance(
             self.data.qpos[0:3], self.data.qvel[0:3]
         )
+        else:
+            # 禁用时必须清零, 否则最后一次的拉力会永久残留在 xfrc_applied
+            self.data.xfrc_applied[self.band_attached_link, :3] = 0.0
+
     def plot_sensor_data(self):
         """绘制传感器数据"""
         if len(self.time_history) == 0:
@@ -767,6 +940,12 @@ class RobotSimulator:
             sim_thread.join(timeout=1.0)
             # 停止发布线程
             self.stop_publishing()
+            # 深度渲染器必须先于 viewer 关闭，否则退出时段错误
+            try:
+                if self.depth_renderer is not None:
+                    self.depth_renderer.close()
+            except:
+                pass
             # 关闭 viewer
             try:
                 self.viewer.close()
@@ -833,7 +1012,7 @@ def _spin_wrapper(node):
 def main():
     # 设置模型路径
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(script_dir, '..', 'urdf', 'dex_evt.xml')
+    model_path = os.path.join(script_dir, '..', 'urdf', 'dex_evt_depth.xml')
     model_path = os.path.abspath(model_path)
 
     # 创建控制器
