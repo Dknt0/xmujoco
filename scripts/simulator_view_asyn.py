@@ -52,7 +52,8 @@ def sleep_until(deadline: float):
 class RobotSimulator:
 
     def __init__(self, model_path, node: Node | None = None, debug=False,
-                 depth=True, depth_width=640, depth_height=360):
+                 # depth=True, depth_width=640, depth_height=360):
+                 depth=True, depth_width=320, depth_height=180):
         self.debug = debug
         # 加载模型
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -1012,7 +1013,7 @@ def _spin_wrapper(node):
 def main():
     # 设置模型路径
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(script_dir, '..', 'urdf', 'dex_evt_depth.xml')
+    model_path = os.path.join(script_dir, '..', 'urdf', 'scene_parkour.xml')
     model_path = os.path.abspath(model_path)
 
     # 创建控制器
