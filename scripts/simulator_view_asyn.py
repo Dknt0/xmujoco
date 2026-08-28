@@ -459,6 +459,7 @@ class RobotSimulator:
         if publisher and sensor_data:
             joint_positions = sensor_data['joint_positions']
             joint_velocities = sensor_data['joint_velocities']
+            joint_torques = sensor_data['joint_torques']
             #构造关节状态消息
             motor_status_msg = MotorStatusMsg()
             motor_status_msg.header.stamp = self.node.get_clock().now().to_msg()
@@ -466,7 +467,7 @@ class RobotSimulator:
                 if joint_name in joint_positions and joint_name in joint_velocities:
                     motor_status = self.construct_motor_status(
                         joint_name, joint_positions[joint_name],
-                        joint_velocities[joint_name])
+                        joint_velocities[joint_name], joint_torques[joint_name])
                     motor_status_msg.status.append(motor_status)
             try:
                 publisher.publish(motor_status_msg)
@@ -691,7 +692,7 @@ class RobotSimulator:
 
         return plot_data
 
-    def construct_motor_status(self, joint_name, pos, speed):
+    def construct_motor_status(self, joint_name, pos, speed, torque):
         """
         构建电机状态消息
         
@@ -707,6 +708,7 @@ class RobotSimulator:
         motor_status.name = self.joint_to_motor_id.get(joint_name, int())
         motor_status.pos = pos
         motor_status.speed = speed
+        motor_status.current = torque
 
         return motor_status
 
