@@ -430,7 +430,7 @@
             <geom pos="0.00022262 0 0.43065" quat="1 0 0 0.00066475" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="head_yaw_link"/>
             <geom pos="0.0794619 0.0111054 0.415488" quat="0.206868 -0.67666 0.675763 -0.206594" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="camera_head_link"/>
             <geom pos="0.092707 0.02375 0.039824" quat="0.21264 -0.674376 0.674378 -0.212641" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="camera_body_front_link"/>
-            <camera name="depth_camera" pos="0.092709 -0.02375 0.039976" euler="0 -0.6108652 -1.5707963" mode="fixed" fovy="58.29"/>
+            <camera name="depth_camera" pos="0.092709 0.0475 0.039976" euler="0 -0.6108652 -1.5707963" mode="fixed" fovy="58.29"/>
             <geom pos="0.00022262 0 0.38426" quat="-3.67321e-06 1 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="radar_head_link"/>
             <geom pos="0.089117 0 0.45841" quat="0.391053 -0.588495 0.590786 -0.389517" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="RGB_head_front_link"/>
             <geom pos="0.044766 0.076816 0.45841" quat="0.533418 -0.805041 0.2174 -0.141813" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.752941 0.752941 0.752941 1" mesh="RGB_head_front_left_link"/>
