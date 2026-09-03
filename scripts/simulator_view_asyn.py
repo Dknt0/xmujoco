@@ -52,8 +52,9 @@ def sleep_until(deadline: float):
 class RobotSimulator:
 
     def __init__(self, model_path, node: Node | None = None, debug=False,
-                 # depth=True, depth_width=640, depth_height=360):
-                 depth=True, depth_width=320, depth_height=180):
+                 depth=True, depth_width=640, depth_height=360):
+                 # depth=True, depth_width=320, depth_height=180):
+                 # depth=True, depth_width=64, depth_height=36):
         self.debug = debug
         # 加载模型
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -345,6 +346,7 @@ class RobotSimulator:
                                                  camera='depth_camera')
             depth = self.depth_renderer.render()
             glfw.make_context_current(None)
+            depth = self._apply_depth_noise(depth)
         except Exception as e:
             print(f"深度渲染失败，已禁用: {e}")
             self.depth_enabled = False
@@ -362,6 +364,40 @@ class RobotSimulator:
         self.depth_img_pub.publish(img)
         self.depth_info.header.stamp = now
         self.depth_info_pub.publish(self.depth_info)
+
+    def _apply_depth_noise(self, depth):
+        """深度加噪流水线, 移植自 instinctlab dex23dof_depth_cfg.py 的
+        noise_pipeline (取其前四级): 高斯噪声 → 亮点/阴影伪影 → 天空伪影"""
+        # 高斯噪声: probability=1.0, noise_mean=0.0, noise_std=0.015
+        depth = depth + np.random.normal(0.0, 0.015, depth.shape)
+        # 亮点伪影(镜面过曝, 值超量程) / 阴影伪影(双目失配归零)
+        self._stamp_artifact_patches(depth, 1e-4, (2, 0.5), [4.0])
+        self._stamp_artifact_patches(depth, 1e-4, (2, 0.5), [0.0])
+        # 天空伪影: 像素及其上方整列均过远(>2m)视为天空,
+        # 天空区域内随机小块替换为典型天空量测值
+        sky = np.cumsum(depth > 2.0, axis=0) > np.arange(depth.shape[0])[:, None]
+        self._stamp_artifact_patches(depth, 1e-4, (2, 3.2),
+                                     [0.6, 1.0, 1.2, 1.5, 1.8], region_mask=sky)
+        return depth
+
+    @staticmethod
+    def _stamp_artifact_patches(depth, prob, size_mean_std, values,
+                                region_mask=None):
+        """以每像素 prob 概率撒种子, 种子处长出边长 ~ N(mean, std) 的小方块
+        伪影, 值从 values 随机取; region_mask 限制伪影只落在掩码区域内"""
+        h, w = depth.shape
+        seeds = np.random.random(depth.shape) < prob
+        for y, x in zip(*np.nonzero(seeds)):
+            value = np.random.choice(values)
+            ph = int(np.clip(np.random.normal(*size_mean_std), 0, h))
+            pw = int(np.clip(np.random.normal(*size_mean_std), 0, w))
+            y0, y1 = max(y - ph // 2, 0), min(y + (ph + 1) // 2, h)
+            x0, x1 = max(x - pw // 2, 0), min(x + (pw + 1) // 2, w)
+            patch = depth[y0:y1, x0:x1]
+            if region_mask is None:
+                patch[:] = value
+            else:
+                patch[region_mask[y0:y1, x0:x1]] = value
 
     def start_publishing(self):
         """启动发布线程"""
