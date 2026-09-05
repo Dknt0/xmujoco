@@ -43,5 +43,5 @@ class ElasticBand:
             self.length -= 0.1
         if key == glfw.KEY_DOWN:
             self.length += 0.1
-        if key == glfw.KEY_ESCAPE:
+        if key == glfw.KEY_SPACE:
             self.enable = not self.enable

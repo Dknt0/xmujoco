@@ -52,9 +52,9 @@ def sleep_until(deadline: float):
 class RobotSimulator:
 
     def __init__(self, model_path, node: Node | None = None, debug=False,
-                 depth=True, depth_width=640, depth_height=360):
+                 # depth=True, depth_width=640, depth_height=360):
                  # depth=True, depth_width=320, depth_height=180):
-                 # depth=True, depth_width=64, depth_height=36):
+                 depth=True, depth_width=64, depth_height=36):
         self.debug = debug
         # 加载模型
         self.model = mujoco.MjModel.from_xml_path(model_path)
