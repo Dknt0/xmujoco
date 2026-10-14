@@ -53,8 +53,8 @@ class RobotSimulator:
 
     def __init__(self, model_path, node: Node | None = None, debug=False,
                  # depth=True, depth_width=640, depth_height=360):
-                 # depth=True, depth_width=320, depth_height=180):
-                 depth=True, depth_width=64, depth_height=36):
+                 depth=True, depth_width=320, depth_height=180):
+                 # depth=True, depth_width=64, depth_height=36):
         self.debug = debug
         # 加载模型
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -202,7 +202,7 @@ class RobotSimulator:
                 PoseStamped, 'pelvis/pose', 10)
             if self.depth_enabled:
                 self.depth_img_pub = self.node.create_publisher(
-                    Image, 'depth_camera/image_raw', 10)
+                    Image, '/camera/depth/image_raw', 10)
                 self.depth_info_pub = self.node.create_publisher(
                     CameraInfo, 'depth_camera/camera_info', 10)
                 fovy = float(self.model.cam_fovy[self._depth_cam_id])
